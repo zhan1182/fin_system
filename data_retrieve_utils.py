@@ -1,4 +1,5 @@
 import os
+import datetime
 from datetime import date
 
 from alpha_vantage.timeseries import TimeSeries
@@ -11,27 +12,33 @@ from data_models import DailyAdjusted, KeyStats, StockDocument
 def get_us_symbols():
     all_symbols = get_symbols()
     us_symbols = []
-    for symbol in all_symbols:
-        if symbol['isEnabled'] is not True:
+    for symbol_dict in all_symbols:
+        if symbol_dict['isEnabled'] is not True:
             continue
-        if symbol['region'] != 'US' or symbol['currency'] != 'USD':
+        if symbol_dict['region'] != 'US' or symbol_dict['currency'] != 'USD':
             continue
-        us_symbols.append(symbol)
+        us_symbols.append(symbol_dict)
     return us_symbols
 
 
 def populate_us_symbols_in_db():
     us_symbols = get_us_symbols()
-    for symbol in us_symbols:
-        stock = StockDocument(symbol=symbol['symbol'],
-            name=symbol['name'], exchange=symbol['exchange'])
-        stock.save()
+    print(len(us_symbols))
+    for symbol_dict in us_symbols:
+        if not StockDocument.objects(symbol=symbol_dict['symbol']):
+            stock_document = StockDocument(symbol=symbol_dict['symbol'],
+                name=symbol_dict['name'],
+                exchange=symbol_dict['exchange'])
+            stock_document.save()
 
 
-def populate_key_stats():
+def populate_key_stats(gap_days):
     for stock_document in StockDocument.objects:
-        # Key stats updates once per day.
-        if stock_document.latest_key_stats == date.today():
+        # Update key stats just once per gap_days. 
+        # Use 0 to enforce a latest update.
+        if stock_document.latest_key_stats is not None \
+            and stock_document.latest_key_stats.query_date.date() \
+                + datetime.timedelta(days=gap_days) >= datetime.date.today():
             continue
 
         # Retrieve key stats data from IEX.
@@ -39,7 +46,7 @@ def populate_key_stats():
         key_stats = stock.get_key_stats()
 
         # Update key stats fields in db.
-        key_stats_document = KeyStats(query_date=date.today())
+        key_stats_document = KeyStats(query_date=datetime.date.today())
 
         key_stats_document.market_cap = key_stats.get('marketcap')
         key_stats_document.pe_ratio = key_stats.get('peRatio')
@@ -78,7 +85,39 @@ def populate_key_stats():
         stock_document.save()
 
 
-def get_historical_daily_adjusted_ts(stock):
-    ts = TimeSeries(key=os.getenv('ALPHA_VANTAGE_KEY'),
-        output_format='pandas')
-    full_daily_adjusted_ts, metadata = ts.get_daily_adjusted(stock.symbol)
+def get_historical_daily_adjusted_ts(symbol, output_format, output_size):
+    ts = TimeSeries(key=os.getenv('ALPHA_VANTAGE_KEY'), output_format=output_format)
+    daily_adjusted_ts, _ = ts.get_daily_adjusted(symbol, outputsize=output_size)
+    return daily_adjusted_ts
+
+
+def get_top_market_cap_stocks(top_size):
+    return StockDocument.objects().order_by('-latest_key_stats.market_cap')[:top_size]    
+
+
+def populate_historical_daily_adjusted_for_market_top_500():
+    for stock_document in get_top_market_cap_stocks(500):
+        full_daily_adjusted_ts = \
+            get_historical_daily_adjusted_ts(stock_document.symbol, 'pandas', 'full')
+
+        dates_to_save = []
+        for time_stamp, daily_adjusted_df in full_daily_adjusted_ts.iterrows():
+            query_date = time_stamp.date()
+            if stock_document.daily_adjusted_ts is None \
+                or stock_document.daily_adjusted_ts[-1].date.date() < query_date:
+                daily_adjusted = DailyAdjusted(time_stamp.date())
+                daily_adjusted.open_price = daily_adjusted_df.get('1. open')
+                daily_adjusted.high = daily_adjusted_df.get('2. high')
+                daily_adjusted.low = daily_adjusted_df.get('3. low')
+                daily_adjusted.close_price = daily_adjusted_df.get('4. close')
+                daily_adjusted.adjusted_close_price = daily_adjusted_df.get('5. adjusted close')
+                daily_adjusted.volume = daily_adjusted_df.get('6. volume')
+                daily_adjusted.dividend = daily_adjusted_df.get('7. dividend amount')
+                daily_adjusted.split_coefficient = daily_adjusted_df.get('8. split coefficient')
+                dates_to_save.append(daily_adjusted)
+
+        for daily_adjusted in dates_to_save[::-1]:
+            stock_document.daily_adjusted_ts.append(daily_adjusted)
+        stock_document.save()
+
+

@@ -59,9 +59,13 @@ class DailyAdjusted(EmbeddedDocument):
 
     open_price = FloatField()
     close_price = FloatField()
-    low = FloatField()
     high = FloatField()
+    low = FloatField()
     volume = LongField()
+
+    adjusted_close_price = FloatField()
+    dividend = FloatField()
+    split_coefficient = FloatField()
     
 
 class StockDocument(Document):
@@ -79,4 +83,4 @@ class StockDocument(Document):
     price_target = EmbeddedDocumentField(PriceTarget)
 
     # Price time series
-    daily_adjusted = SortedListField(EmbeddedDocumentField(DailyAdjusted))
+    daily_adjusted_ts = ListField(EmbeddedDocumentField(DailyAdjusted))
